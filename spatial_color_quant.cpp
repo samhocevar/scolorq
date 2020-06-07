@@ -514,13 +514,35 @@ int best_match_color(array3d<double>& vars, int i_x, int i_y,
 
 void zoom_double(array3d<double>& small, array3d<double>& big)
 {
-    for(int y=0; y<small.get_height(); y++) {
-	for(int x=0; x<small.get_width(); x++) {
-	    for(int z=0; z<small.get_depth(); z++) {
-		big(2*x, 2*y, z) = small(x, y, z);
-		big(2*x + 1, 2*y, z) = small(x, y, z);
-		big(2*x, 2*y + 1, z) = small(x, y, z);
-		big(2*x + 1, 2*y + 1, z) = small(x, y, z);
+    for(int y=0; y<big.get_height()/2*2; y+=2) {
+	for(int x=0; x<big.get_width()/2*2; x+=2) {
+	    for(int z=0; z<big.get_depth(); z++) {
+		int x_center = x/2, y_center = y/2;
+		int x_left = x/2 - 1;
+		if (x_left < 0) x_left++;
+		int x_right = x/2 + 1;
+		if (x_right >= small.get_width()) x_right--;
+		int y_up = y/2 - 1;
+		if (y_up < 0) y_up++;
+		int y_down = y/2 + 1;
+		if (y_down >= small.get_height()) y_down--;
+
+		big(x, y, z) = 0.70*small(x_center, y_center, z) +
+		               0.12*small(x_left,   y_center, z) +
+		               0.12*small(x_center, y_up, z) +
+	                       0.06*small(x_left,   y_up, z);
+		big(x+1, y, z) = 0.70*small(x_center, y_center, z) +
+		                 0.12*small(x_right,  y_center, z) +
+		                 0.12*small(x_center, y_up, z) +
+		                 0.06*small(x_right,  y_up, z);
+		big(x, y+1, z) = 0.70*small(x_center, y_center, z) +
+		                 0.12*small(x_left,   y_center, z) +
+		                 0.12*small(x_center, y_down, z) +
+		                 0.06*small(x_left,   y_down, z);
+		big(x+1, y+1, z) = 0.70*small(x_center, y_center, z) +
+		                   0.12*small(x_right,  y_center, z) +
+		                   0.12*small(x_center, y_down, z) +
+		                   0.06*small(x_right,  y_down, z);
 	    }
 	}
     }
@@ -540,6 +562,116 @@ void zoom_double(array3d<double>& small, array3d<double>& big)
 	    }
 	}
     }
+}
+
+void compute_initial_s(array2d< vector_fixed<double,3> >& s,
+		       array3d<double>& coarse_variables,
+                       array2d< vector_fixed<double, 3> >& b)
+{
+    int palette_size  = s.get_width();
+    int coarse_width  = coarse_variables.get_width();
+    int coarse_height = coarse_variables.get_height();
+    int center_x = (b.get_width()-1)/2, center_y = (b.get_height()-1)/2;
+    vector_fixed<double,3> center_b = b_value(b,0,0,0,0);
+    vector_fixed<double,3> zero_vector;
+    for (int v=0; v<palette_size; v++) {
+	for (int alpha=v; alpha<palette_size; alpha++) {
+	    s(v,alpha) = zero_vector;
+	}
+    }
+    for (int i_y=0; i_y<coarse_height; i_y++) {
+	for (int i_x=0; i_x<coarse_width; i_x++) {
+	    int max_j_x = min(coarse_width,  i_x - center_x + b.get_width());
+	    int max_j_y = min(coarse_height, i_y - center_y + b.get_height());
+	    for (int j_y=max(0, i_y - center_y); j_y<max_j_y; j_y++) {
+		for (int j_x=max(0, i_x - center_x); j_x<max_j_x; j_x++) {
+		    if (i_x == j_x && i_y == j_y) continue;
+		    vector_fixed<double,3> b_xy = b_value(b,i_x,i_y,j_x,j_y);
+		    for (int v=0; v<palette_size; v++) {
+			for (int alpha=v; alpha<palette_size; alpha++) {
+			    s(v,alpha) += coarse_variables(i_x,i_y,v)*
+				          coarse_variables(j_x,j_y,alpha)*
+				          b_xy;
+			}
+		    }
+		}
+	    }	    
+	    for (int v=0; v<palette_size; v++) {
+		s(v,v) += coarse_variables(i_x,i_y,v)*center_b;
+	    }
+	}
+    }
+}
+
+void update_s(array2d< vector_fixed<double,3> >& s,
+	      array3d<double>& coarse_variables,
+	      array2d< vector_fixed<double, 3> >& b,
+	      int j_x, int j_y, int alpha,
+	      double delta)
+{
+    if (abs(delta) < 0.001) return;
+
+    int palette_size  = s.get_width();
+    int coarse_width  = coarse_variables.get_width();
+    int coarse_height = coarse_variables.get_height();
+    int center_x = (b.get_width()-1)/2, center_y = (b.get_height()-1)/2;
+    int max_i_x = min(coarse_width,  j_x + center_x + 1);
+    int max_i_y = min(coarse_height, j_y + center_y + 1);
+    for (int i_y=max(0, j_y - center_y); i_y<max_i_y; i_y++) {
+	for (int i_x=max(0, j_x - center_x); i_x<max_i_x; i_x++) {
+	    vector_fixed<double,3> delta_b_ij = delta*b_value(b,i_x,i_y,j_x,j_y);
+	    if (i_x == j_x && i_y == j_y) continue;
+	    for (int v=0; v <= alpha; v++) {
+		s(v,alpha) += delta_b_ij*coarse_variables(i_x,i_y,v);
+	    }
+	    for (int v=alpha; v<palette_size; v++) {
+		s(alpha,v) += delta_b_ij*coarse_variables(i_x,i_y,v);
+	    }
+	}
+    }
+    s(alpha,alpha) += delta*b_value(b,0,0,0,0);
+}
+
+void refine_palette(array2d< vector_fixed<double,3> >& s,
+		    array3d<double>& coarse_variables,
+		    array2d< vector_fixed<double, 3> >& a,
+		    vector< vector_fixed<double, 3> >& palette)
+{
+    // We only computed the half of S above the diagonal - reflect it
+    for (int v=0; v<s.get_width(); v++) {
+	for (int alpha=0; alpha<v; alpha++) {
+	    s(v,alpha) = s(alpha,v);
+	}
+    }
+
+    vector< vector_fixed<double,3> > r(palette.size());
+    for (unsigned int v=0; v<palette.size(); v++) {
+	for (int i_y=0; i_y<coarse_variables.get_height(); i_y++) {
+	    for (int i_x=0; i_x<coarse_variables.get_width(); i_x++) {
+		r[v] += coarse_variables(i_x,i_y,v)*a(i_x,i_y);
+	    }
+	}
+    }
+
+    double max_diff = 0;
+    for (unsigned int k=0; k<3; k++) {
+	array2d<double> S_k = extract_vector_layer_2d(s, k);
+	vector<double> R_k = extract_vector_layer_1d(r, k);
+	vector<double> palette_channel = -1.0*((2.0*S_k).matrix_inverse())*R_k;
+	for (unsigned int v=0; v<palette.size(); v++) {
+	    double val = palette_channel[v];
+	    if (val < 0) val = 0;
+	    if (val > 1) val = 1;
+	    double diff = palette[v](k) - val;
+	    palette[v](k) = val;
+	    if (diff > max_diff) max_diff = diff;
+	}		
+    }
+#if TRACE
+    for (unsigned int v=0; v<palette.size(); v++) {
+	cout << palette[v] << endl;
+    }
+#endif
 }
 
 void spatial_color_quant(array2d< vector_fixed<double, 3> >& image,
@@ -610,11 +742,14 @@ void spatial_color_quant(array2d< vector_fixed<double, 3> >& image,
     // Multiscale annealing
     coarse_level = max_coarse_level;
     const int iters_per_level = 3;
-    double temperature_multiplier = pow(final_temperature/initial_temperature, 1.0/(max_coarse_level*iters_per_level));
+    double temperature_multiplier = pow(final_temperature/initial_temperature, 1.0/(max(3, max_coarse_level*iters_per_level)));
 #if TRACE
     cout << "Temperature multiplier: " << temperature_multiplier << endl;
 #endif
     int iters_at_current_level = 0;
+    bool skip_palette_maintenance = false;
+    array2d< vector_fixed<double,3> > s(palette.size(), palette.size());
+    compute_initial_s(s, coarse_variables, b_vec[coarse_level]);
     while (coarse_level >= 0 || temperature > final_temperature) {
 	// Need to reseat this reference in case we changed p_coarse_variables
 	array3d<double>& coarse_variables = *p_coarse_variables;
@@ -628,7 +763,7 @@ void spatial_color_quant(array2d< vector_fixed<double, 3> >& image,
 	int step_counter = 0;
 	for(int repeat=0; repeat<1; repeat++)
 	{
-	    int pixels_changed = 0;
+	    int pixels_changed = 0, pixels_visited = 0;
 	    deque< pair<int, int> > visit_queue;
 	    random_permutation_2d(coarse_variables.get_width(), coarse_variables.get_height(), visit_queue);
 
@@ -687,7 +822,11 @@ void spatial_color_quant(array2d< vector_fixed<double, 3> >& image,
 		    // Prevent the matrix S from becoming singular
 		    if (new_val <= 0) new_val = 1e-250;
 		    if (new_val >= 1) new_val = 1 - 1e-16;
+		    double delta_m_iv = new_val - coarse_variables(i_x,i_y,v);
 		    coarse_variables(i_x,i_y,v) = new_val;
+		    if (!skip_palette_maintenance) {
+			update_s(s, coarse_variables, b, i_x, i_y, v, delta_m_iv);
+		    }
 		}
 		int max_v = best_match_color(coarse_variables, i_x, i_y, palette);
 		if (old_max_v != max_v) {
@@ -704,6 +843,7 @@ void spatial_color_quant(array2d< vector_fixed<double, 3> >& image,
 			}
 		    }
 		}
+		pixels_visited++;
 
 		// Show progress with dots - in a graphical interface,
 		// we'd show progressive refinements of the image instead,
@@ -713,68 +853,25 @@ void spatial_color_quant(array2d< vector_fixed<double, 3> >& image,
 		    cout << ".";
 		    cout.flush();
 		}
+		if ((step_counter % 50000) == 0) {
+		    if (!skip_palette_maintenance) {
+			refine_palette(s, coarse_variables, a, palette);
+			if (pixels_changed*5 > pixels_visited)
+			    skip_palette_maintenance = true;
+		    }
+		}
 	    }
 #if TRACE
 	    cout << "Pixels changed: " << pixels_changed << endl;
 #endif
-
-	    array2d< vector_fixed<double,3> > s(palette.size(), palette.size());
-	    for (int i_y=0; i_y<coarse_variables.get_height(); i_y++) {
-		for (int i_x=0; i_x<coarse_variables.get_width(); i_x++) {
-		    int max_j_x = min(coarse_variables.get_width(), i_x - center_x + b.get_width());
-		    int max_j_y = min(coarse_variables.get_height(), i_y - center_y + b.get_height());
-		    for (int j_y=max(0, i_y - center_y); j_y<max_j_y; j_y++) {
-			for (int j_x=max(0, i_x - center_x); j_x<max_j_x; j_x++) {
-			    if (i_x == j_x && i_y == j_y) continue;
-			    for (unsigned int v=0; v<palette.size(); v++) {
-				for (unsigned int alpha=v; alpha<palette.size(); alpha++) {
-				    s(v,alpha) += coarse_variables(i_x,i_y,v)*coarse_variables(j_x,j_y,alpha)*b_value(b,i_x,i_y,j_x,j_y);
-				}
-			    }
-			}
-		    }	    
-		}
+	    if (skip_palette_maintenance) {
+		compute_initial_s(s, *p_coarse_variables, b_vec[coarse_level]);
 	    }
-	    vector_fixed<double,3> center_b = b_value(b,0,0,0,0);
-	    for (int i_y=0; i_y<coarse_variables.get_height(); i_y++) {
-		for (int i_x=0; i_x<coarse_variables.get_width(); i_x++) {
-		    for (unsigned int v=0; v<palette.size(); v++) {
-			s(v,v) += coarse_variables(i_x,i_y,v)*center_b;
-		    }
-		}
-	    }
-	    for (unsigned int v=0; v<palette.size(); v++) {
-		for (unsigned int alpha=0; alpha<v; alpha++) {
-		    s(v,alpha) = s(alpha,v);
-		}
-	    }
-            //cout << s << endl;
-
-	    vector< vector_fixed<double,3> > r(palette.size());
-	    for (unsigned int v=0; v<palette.size(); v++) {
-		for (int i_y=0; i_y<coarse_variables.get_height(); i_y++) {
-		    for (int i_x=0; i_x<coarse_variables.get_width(); i_x++) {
-			r[v] += coarse_variables(i_x,i_y,v)*a(i_x,i_y);
-		    }
-		}
-	    }
-
-	    for (unsigned int k=0; k<3; k++) {
-		array2d<double> S_k = extract_vector_layer_2d(s, k);
-		vector<double> R_k = extract_vector_layer_1d(r, k);
-		vector<double> palette_channel = -1.0*((2.0*S_k).matrix_inverse())*R_k;
-		for (unsigned int v=0; v<palette.size(); v++) {
-		    palette[v](k) = palette_channel[v];
-		}		
-	    }
-#if TRACE
-	    for (unsigned int v=0; v<palette.size(); v++) {
-		cout << palette[v] << endl;
-	    }
-#endif
+	    refine_palette(s, coarse_variables, a, palette);
         }
 
 	iters_at_current_level++;
+	skip_palette_maintenance = false;
 	if ((temperature <= final_temperature || coarse_level > 0) &&
 	    iters_at_current_level >= iters_per_level)
 	{
@@ -788,6 +885,7 @@ void spatial_color_quant(array2d< vector_fixed<double, 3> >& image,
 	    delete p_coarse_variables;
 	    p_coarse_variables = p_new_coarse_variables;
 	    iters_at_current_level = 0;
+	    skip_palette_maintenance = true;
 #ifdef TRACE
 	    cout << "Image size: " << p_coarse_variables->get_width() << " " << p_coarse_variables->get_height() << endl;
 #endif
